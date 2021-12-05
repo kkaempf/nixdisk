@@ -1,3 +1,15 @@
+#
+# textcopy.c
+#
+# Space-expand Nixdorf 8820 text files
+#
+# Reads from stdin, writes to stdout
+#
+# Copyright (c) Klaus Kämpf, 2021
+#
+# License: MIT
+#
+
 #include <stdio.h>
 
 int main()
