@@ -1,4 +1,4 @@
-#!/usr/bin/env ruby
+#!/bin/env ruby
 #
 # nixtape.rb
 #
@@ -17,6 +17,9 @@
 #
 VERSION = "0.0.1"
 SECSIZE = 128
+SECPERCYL = 26
+BYTESPERCYL = (SECSIZE * SECPERCYL)
+
        #     0   1   2   3   4   5   6   7   8   9   A   B   C   D   E   F
 EBCDIC = "\x00\xb7\xb7\xb7\xb7\x08\xb7\x7f\xb7\xb7\xb7\xb7\xb7\x0d\xb7\xb7" + # 0x00
          "\xb7\xb7\xb7\xb7\xb7\x0a\x08\xb7\xb7\xb7\xb7\xb7\xb7\xb7\xb7\xb7" + # 0x10
@@ -44,7 +47,6 @@ def usage message=nil
 end
 
 class Disk
-  SECPERTRACK = 26
 
   #
   # seek disk position
@@ -60,7 +62,7 @@ class Disk
     when Array
       track, side, sector = pos
 #    puts "Seek T#{track},S#{sector}"
-      @disk.seek ((track*(side+1))*SECPERTRACK+sector-1)*SECSIZE, IO::SEEK_SET
+      @disk.seek ((track*(side+1))*SECPERCYL+sector-1)*SECSIZE, IO::SEEK_SET
     when Integer
       @disk.seek pos, IO::SEEK_SET
     else
@@ -164,7 +166,7 @@ class Disk
 end
 
 class Volume
-  attr_reader :number, :ident, :rlen, :seq, :disk 
+  attr_reader :number, :ident, :rlen, :seq, :alloc, :disk
   def initialize disk
     @disk = disk
     #
@@ -340,9 +342,13 @@ class FileHeader
     #
     # HDR1
     #
-    disk.seek pos
-    data = disk.get 80
-    unless disk.conv(data[0,4]) == "HDR1"
+    (0..4).each do |_|
+      disk.seek pos
+      data = disk.get 80
+      break if disk.conv(data[0,4]) == "HDR1"
+      pos = pos - SECSIZE # track back to compensate for missing sectors
+    end
+    unless disk.conv(disk.record[0,4]) == "HDR1"
       raise "FileHeader HDR1 not found at 0x#{pos.to_s(16)}"
     end
 
@@ -383,9 +389,9 @@ FileHeader1
 FileHeader2
     u     #{@u}
     rsize #{@rsize}
-    start #{@start} (0x#{((@start - @directory.magic) * SECSIZE).to_s(16)})
+    start #{@start} (0x#{((@start - @directory.offset) * SECSIZE).to_s(16)})
     next header #{@next_header}
-    end   #{@end} (0x#{((@end - @directory.magic) * SECSIZE).to_s(16)})
+    end   #{@end} (0x#{((@end - @directory.offset) * SECSIZE).to_s(16)})
     bytes in last record: #{@last}
     
     computed length #{@length}
@@ -400,7 +406,7 @@ class NixFile
   def initialize directory, start
     @directory = directory
     @disk = directory.volume.disk
-    @offset = (start - directory.magic) * SECSIZE;
+    @offset = (start - directory.offset) * SECSIZE;
     @fh = FileHeader.new directory, @offset
   end
   def to_s
@@ -412,7 +418,7 @@ class NixFile
     len = @fh.length
     File.open(name, "w+") do |f|
       while pos <= @fh.end do
-        off = (pos - @directory.magic) * SECSIZE;
+        off = (pos - @directory.offset) * SECSIZE;
         data = @disk.get_at off
         if len < SECSIZE
           f.write data[0,len]
@@ -437,15 +443,25 @@ end
 class DirEntry
   attr_reader :name, :flag, :start
   def initialize directory, data
+    @directory = directory
 #    puts "DirEntry #{data.inspect}"
-    @name = directory.volume.disk.conv(data[0,8])
+    @name = @directory.volume.disk.conv(data[0,8])
 #    puts "=> #{@name}"
     @flag = data[8,1].unpack1("C1")
     @start = data[9,2].unpack1("S>1")
-    @offset = (@start - directory.magic) * SECSIZE;
+    @offset = (@start - @directory.offset) * SECSIZE;
   end
   def to_s
-    "#{@name} #{(@flag == 0x40)?"<SYS>":"     "} #{@start} (0x#{@offset.to_s(16)})"
+    secoff = @offset / SECSIZE
+    cyl = secoff / SECPERCYL
+    sec = secoff % SECPERCYL
+    sid = if @directory.volume.alloc == '1' # double-sided
+            sid = cyl % 2
+            cyl = cyl / 2
+          else
+            sid = 0
+          end
+    "#{@name} #{(@flag == 0x40)?"<SYS>":"     "} #{@start} (0x#{@offset.to_s(16)}[cyl #{cyl}, sid #{sid}, sec #{sec}])"
   end
 end
 
@@ -454,24 +470,21 @@ end
 #
 
 class NixDir
-  attr_reader :volume, :magic
+  attr_reader :volume, :offset
   def initialize volume
     @volume = volume
-    case volume.rlen
-    when 128
-      @volume.disk.seek [1, 0, (@volume.seq==13)?1:@volume.seq]
-      @magic = 76
-    when 256
-      @volume.disk.seek [1, 0, @volume.seq]
-      @magic = 71
-    else
-      STDERR.puts "Don't know where to find directory for Volume.rlen #{volume.rlen}"
-    end
-    offset = 0
+    sector = case volume.rlen
+             when 128 then 1
+             when 256 then 5
+             else
+               STDERR.puts "Don't know where to find directory for Volume.rlen #{volume.rlen}"
+             end
+    @offset = 76 - sector
     @entries = []
+    @volume.disk.seek [1, 0, sector]
     loop do
-      data = @volume.disk.get 11
-      break if data.unpack1("c1") == -1
+      data = @volume.disk.get 11 # 11 bytes per dir entry
+      break if data.unpack1("c1") == -1 # get 1 (first) char from data, as signed integer
       begin
         @entries << DirEntry.new(self, data)
 #      rescue
