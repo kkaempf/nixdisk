@@ -445,7 +445,7 @@ class DirEntry
   def initialize directory, data
     @directory = directory
 #    puts "DirEntry #{data.inspect}"
-    @name = @directory.volume.disk.conv(data[0,8])
+    @name = @directory.volume.disk.conv(data[0,8]).strip
 #    puts "=> #{@name}"
     @flag = data[8,1].unpack1("C1")
     @start = data[9,2].unpack1("S>1")
@@ -551,7 +551,7 @@ end
 if filename
   entry = nixdisk.directory.find filename
   if entry.nil?
-    STDERR.puts "File '#{filename}' not found"
+    STDERR.puts "File #{filename.inspect} not found"
     exit 1
   end
   if entry.flag != 0x40
