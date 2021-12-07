@@ -1,14 +1,14 @@
-#
-# textcopy.c
-#
-# Space-expand Nixdorf 8820 text files
-#
-# Reads from stdin, writes to stdout
-#
-# Copyright (c) Klaus Kämpf, 2021
-#
-# License: MIT
-#
+/*
+ * textcopy.c
+ * 
+ * Space-expand Nixdorf 8820 text files
+ *
+ * Reads from stdin, writes to stdout
+ *
+ * Copyright (c) Klaus Kämpf, 2021
+ *
+ * License: MIT
+ */
 
 #include <stdio.h>
 
@@ -16,64 +16,31 @@ int main()
 {
     FILE *in = stdin;
     FILE *out = stdout;
-    int in_file;
-    in_file = 1;
-    while (in_file) {
+    for (;;) {
         int c;
-        unsigned char head[3];
-        int in_line;
-        int ll; /* line length */
-        if (fread(head, sizeof(unsigned char), 3, in) < 3)
-            break;
-/*        for (int i = 0; i < 3; i++)
-            fprintf(out, "%02x ", head[i]);
- */
-        if (head[2] == 0x1f) { /* EOF */
-            in_file = 0;
+        c = fgetc(in);
+        if (c == EOF) {
             break;
         }
-        in_line = 1;
-        ll = 0;
-        while (in_line) {
-            c = fgetc(in);
-            if (c == EOF) {
-                in_file = 0;
-                break;
-            }
-            if ((c >= 0x20) && (c < 0x7f)) {
-                ll++;
-                fputc(c, out);
-            }
-            else if (c == 0) {
-                ungetc(c, in);
-                fputc('\n', out);
-                in_line = 0;
-            }
-            else if (ll == 0) {
-                if (c < 0xc8) {
-                    for (int i = 0x80; i < c; i++) {
-                        ll++;
-                        fputc(' ', out);
-                    }
-                }
-                else if (c == 0xc8) {
-                    fputc('\n', out);
-                    in_line = 0;
-                }
-                else {
-                    fprintf(out, "[%02x]", c);
-                }
-            }
-            else if (c < 0x89) {
-                for (int i = 0x80; i < c; i++) {
-                    ll++;
-                    fputc(' ', out);
-                }
-            }
-            else {
-//                    fprintf(out, ">%d/%02x<\n", ll,  c);
-                    fputc('\n', out);
-                    in_line = 0;                
+        if (c == 0x1c) { /* LF */
+            fputc('\n', out);
+            continue;
+        }
+        if (c == 0x1f) { /* EOF */
+            fputc('\n', out);
+            break;
+        }
+        if ((c >= 0x20) && (c < 0x7f)) {
+            fputc(c, out);
+            continue;
+        }
+        if (c == 0) {   /* assume 00 00 */
+            fgetc(in); /* consume 2nd 00 */
+            continue;
+        }
+        if (c < 0xc8) {
+            for (int i = 0x80; i < c; i++) {
+                fputc(' ', out);
             }
         }
     }
