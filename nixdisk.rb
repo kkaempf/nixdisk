@@ -40,9 +40,18 @@ EBCDIC = "\x00\xb7\xb7\xb7\xb7\x08\xb7\x7f\xb7\xb7\xb7\xb7\xb7\x0d\xb7\xb7" + # 
         "0123456789······" # 0xf0
 
 def usage message=nil
-  STDERR.puts message if message
+  STDERR.puts "** Error: #{message}" if message
+  STDERR.puts
+  STDERR.puts "nixdisk - extract data from Nixdorf 8820 floppy disk images"
+  STDERR.puts
   STDERR.puts "Usage:"
-  STDERR.puts "ibmtape <image>"
+  STDERR.puts "  nixdisk <image> <command> [<options> ...]"
+  STDERR.puts
+  STDERR.puts "  nixdisk <image> dir          - show directory"
+  STDERR.puts "  nixdisk <image> dir <name>   - show sub-directory <name>"
+  STDERR.puts "  nixdisk <image> copy <name>  - copy file <name> to local dir"
+  STDERR.puts "  nixdisk <image> copy \*     - copy all files to local dir"
+  
   exit 1
 end
 
