@@ -47,8 +47,9 @@ def usage message=nil
   STDERR.puts "Usage:"
   STDERR.puts "  nixdisk <image> <command> [<options> ...]"
   STDERR.puts
-  STDERR.puts "  nixdisk <image> dir          - show directory"
-  STDERR.puts "  nixdisk <image> dir <name>   - show sub-directory <name>"
+  STDERR.puts "  nixdisk <image> headers      - print volume headers"
+  STDERR.puts "  nixdisk <image> show         - show directory"
+  STDERR.puts "  nixdisk <image> show <name>  - show file details for <name>"
   STDERR.puts "  nixdisk <image> copy <name>  - copy file <name> to local dir"
   STDERR.puts "  nixdisk <image> copy \*     - copy all files to local dir"
   
@@ -56,6 +57,7 @@ def usage message=nil
 end
 
 class Disk
+  attr_reader :position
 
   #
   # seek disk position
@@ -71,12 +73,13 @@ class Disk
     when Array
       track, side, sector = pos
 #    puts "Seek T#{track},S#{sector}"
-      @disk.seek ((track*(side+1))*SECPERCYL+sector-1)*SECSIZE, IO::SEEK_SET
+      @position = ((track*(side+1))*SECPERCYL+sector-1)*SECSIZE
     when Integer
-      @disk.seek pos, IO::SEEK_SET
+      @position = pos
     else
       raise "Unknown seek value #{pos.inspect}"
     end
+    @disk.seek @position, IO::SEEK_SET
   end
 
   #
@@ -134,8 +137,7 @@ class Disk
     begin
       conv(s).strip
     rescue Exception => e
-      STDERR.puts "Failed EBCDIC #{s.inspect}"
-      raise e
+      raise "Failed EBCDIC #{s.inspect}: #{e}"
     end
   end
 
@@ -351,6 +353,7 @@ class FileHeader
     #
     # HDR1
     #
+    data = nil
     (0..4).each do |_|
       disk.seek pos
       data = disk.get 80
@@ -358,18 +361,27 @@ class FileHeader
       pos = pos - SECSIZE # track back to compensate for missing sectors
     end
     unless disk.conv(disk.record[0,4]) == "HDR1"
-      raise "FileHeader HDR1 not found at 0x#{pos.to_s(16)}"
+      raise "FileHeader HDR1 not found at 0x#{disk.position.to_s(16)}"
     end
 
-    @name = disk.unpack_s 5,23
-    @remainder1 = disk.unpack_s 28, 100
+    @name = disk.unpack_s 5,17
+    @set_id = disk.unpack_s 22,6
+    @section_id = disk.unpack_i 28, 4
+    @sequence_nr = disk.unpack_i 32, 4
+    @generation = disk.unpack_i 36, 4
+    @generation_version = disk.unpack_i 40,2
+    @creation_date = disk.unpack_date 42
+    @expiration_date = disk.unpack_date 48
+    @accessibility = data[54,1].unpack1("a1")
+    @block_count = disk.unpack_i 55,6
+    @implementation = disk.unpack_s 61,13
 
     #
     # HDR2
     #
     data = disk.get 48
     unless disk.conv(data[0,4]) == "HDR2"
-      raise "HDR2 not found"
+      raise "File #{@name}: HDR2 not found at 0x#{disk.position.to_s(16)}"
     end
     @u = disk.unpack_s 5, 1
     @rsize = disk.unpack_i 6, 5
@@ -384,17 +396,28 @@ class FileHeader
     # "  00"
     #
     data = disk.get 128
-    unless disk.conv(data[0,4]) == "  00"
-      raise "'  00' not found"
+    case disk.conv(data[0,4])
+    when "  00"
+      @date1 = disk.unpack_date 117
+      @date2 = disk.unpack_date 123
+    when "IN00"
+    when "HDR3"
     end
-    @date1 = disk.unpack_date 117
-    @date2 = disk.unpack_date 123
   end
   def to_s
     "\
 FileHeader1
-    Name  #{@name}
-    ?     #{@remainder1.inspect}
+    Name                      #{@name}
+    File Set Identifier       #{@set_id}
+    File Section Number       #{@section_id}
+    File Sequence Number      #{@sequence_nr}
+    Generation Number         #{@generation}
+    Generation Version Number #{@generation_version}
+    Creation Date             #{@creation_date}
+    Expiration Date           #{@expiration_date}
+    File Accessibility        #{@accessibility.inspect}
+    Block Count               #{@block_count}
+    Implementation Identifier #{@implementation}
 FileHeader2
     u     #{@u}
     rsize #{@rsize}
@@ -420,6 +443,9 @@ class NixFile
   end
   def to_s
     @fh.to_s
+  end
+  def name
+    @fh.name
   end
   def copy name=nil
     name ||= @fh.name
@@ -511,6 +537,11 @@ class NixDir
     end
     nil
   end
+  def each &block
+    @entries.each do |e|
+      yield e
+    end
+  end
 end
 
 
@@ -544,34 +575,88 @@ end
 #---------------------------------------------------------------------
 # main
 
-imagename = ARGV.shift
-filename = ARGV.shift
-usage "image missing" if imagename.nil?
+imagename = nil
+command = nil
 
-nixdisk = NixDisk.new imagename
-unless filename
+loop do
+  arg = ARGV.shift
+  break if arg.nil?
+  if imagename.nil?
+    imagename = arg
+    next
+  end
+  if command.nil?
+    command = arg 
+    break
+  end
+end
+
+usage "image missing" if imagename.nil?
+usage "command missing" if command.nil?
+
+begin
+  nixdisk = NixDisk.new imagename
+rescue Exception => e
+  STDERR.puts "Can't recognize #{imagename} as disk image: #{e}"
+  raise e
+end
+
+case command
+when "headers"
   puts nixdisk.volume
   puts "#{nixdisk.headers.length} Headers"
   nixdisk.headers.each do |h|
-  #  puts h
+    puts h
   end
-end
-# puts nixdisk.errormap
-if filename
-  entry = nixdisk.directory.find filename
-  if entry.nil?
-    STDERR.puts "File #{filename.inspect} not found"
-    exit 1
-  end
-  if entry.flag != 0x40
-    file = NixFile.new nixdisk.directory, entry.start
-    puts file
-    file.copy filename
+when "show"
+  if ARGV.empty?
+    puts nixdisk.directory
   else
-    STDERR.puts "Can't handle #{entry}"
+    wildcard = false
+    ARGV.each do |filename|
+      if filename == "*"
+        nixdisk.directory.each do |entry|
+          file = NixFile.new nixdisk.directory, entry.start
+          puts file
+        end
+      else
+        entry = nixdisk.directory.find filename
+        if entry.nil?
+          STDERR.puts "File #{filename.inspect} not found"
+          exit 1
+        else
+          file = NixFile.new nixdisk.directory, entry.start
+          puts file
+        end
+      end
+    end
+  end
+when "copy"
+  ARGV.each do |filename|
+    if filename == "*"
+      nixdisk.directory.each do |entry|
+        if entry.flag != 0x40
+          file = NixFile.new nixdisk.directory, entry.start
+          puts file.name
+          file.copy file.name
+        end
+      end
+    else
+      entry = nixdisk.directory.find filename
+      if entry.nil?
+        STDERR.puts "File #{filename.inspect} not found"
+        exit 1
+      else
+        if entry.flag != 0x0
+          STDERR.puts "Can't handle #{entry}"
+        else
+          file = NixFile.new nixdisk.directory, entry.start
+          puts file.name
+          file.copy filename
+        end
+      end
+    end  
   end
 else
-  puts nixdisk.directory
+  usage "Unknown command #{command.inspect}"
 end
-puts "Ok"
-
