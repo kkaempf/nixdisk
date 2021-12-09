@@ -434,6 +434,56 @@ FileHeader00
   end
 end
 
+
+#
+# System directory
+#
+
+class SysDir
+  attr_reader :volume, :offset
+  #
+  # create from DirEntry
+  #
+  def initialize entry
+#    STDERR.puts "SysDir.new from #{entry.class}:#{entry.name}"
+    @volume = entry.directory.volume
+    fhoffset = (entry.start - entry.directory.offset) * SECSIZE;
+#    STDERR.puts "SysDir offset 0x#{fhoffset.to_s(16)}"
+    @fh = FileHeader.new entry.directory, fhoffset
+#    STDERR.puts "SysDir FileHeader #{@fh}"
+    sysdiroffset = (@fh.start - entry.directory.offset) * SECSIZE;
+#    STDERR.puts "SysDir FileHeader start 0x#{sysdiroffset.to_s(16)}"
+    @entries = []
+    @volume.disk.seek sysdiroffset
+    loop do
+      data = @volume.disk.get 13 # 13 bytes per sys dir entry
+ #     puts "SYSDIR data #{data.inspect}"
+      break if data.unpack1("c1") == -1 # get 1 (first) char from data, as signed integer
+      begin
+        @entries << DirEntry.new(entry.directory, data, :system)
+#      rescue
+#        STDERR.puts "Bad directory (after #{@entries.length} entries)"
+#        break
+      end
+    end
+  end
+  def to_s
+    "System Directory\n" + (@entries.map{|d| "  #{d}"}).join("\n")
+  end
+  def find name
+    @entries.each do |e|
+      return e if e.name == name
+    end
+    nil
+  end
+  def each &block
+    @entries.each do |e|
+      yield e
+    end
+  end
+end
+
+
 class NixFile
   def initialize directory, start
     @directory = directory
@@ -476,15 +526,33 @@ end
 #
 
 class DirEntry
-  attr_reader :name, :flag, :start
-  def initialize directory, data
+  attr_reader :name, :flag, :start, :directory
+  def initialize directory, data, as_system = nil
     @directory = directory
 #    puts "DirEntry #{data.inspect}"
-    @name = @directory.volume.disk.conv(data[0,8]).strip
-#    puts "=> #{@name}"
-    @flag = data[8,1].unpack1("C1")
-    @start = data[9,2].unpack1("S>1")
-    @offset = (@start - @directory.offset) * SECSIZE;
+    if as_system # system entry - 13 bytes
+      @name = @directory.volume.disk.conv(data[0,6]).strip
+    puts "=> #{@name.inspect}"
+      @flag = data[6,1].unpack1("C1")
+    puts "=> #{@flag.inspect}"
+      @start = data[7,2].unpack1("S>1")
+    puts "=> #{@start.inspect}"
+      @offset = (@start - @directory.offset) * SECSIZE;
+      @unknown = data[9,4].unpack("C4").map{|i| "0x#{i.to_s(16)}" }.join(', ')
+    puts "=> #{@unknown.inspect}"
+    else # normal entry - 11 bytes
+      @name = @directory.volume.disk.conv(data[0,8]).strip
+      #    puts "=> #{@name}"
+      @flag = data[8,1].unpack1("C1")
+      @start = data[9,2].unpack1("S>1")
+      @offset = (@start - @directory.offset) * SECSIZE;
+    end
+  end
+  def is_system?
+    @flag == 0x40
+  end
+  def is_deleted?
+    @flag == 0x80
   end
   def to_s
     secoff = @offset / SECSIZE
@@ -496,7 +564,7 @@ class DirEntry
           else
             sid = 0
           end
-    "#{@name} #{(@flag == 0x40)?"<SYS>":"     "} #{@start} (0x#{@offset.to_s(16)}[cyl #{cyl}, sid #{sid}, sec #{sec}])"
+          "#{@name} #{(is_system?)?'<SYS>':'     '} #{(is_deleted?)?'<DEL>':'     '} #{@start} (0x#{@offset.to_s(16)}[cyl #{cyl}, sid #{sid}, sec #{sec}]) #{@unknown}"
   end
 end
 
@@ -616,7 +684,11 @@ when "show"
     ARGV.each do |filename|
       if filename == "*"
         nixdisk.directory.each do |entry|
-          file = NixFile.new nixdisk.directory, entry.start
+          file = if entry.is_system?
+                   SysDir.new entry
+                 else
+                   NixFile.new nixdisk.directory, entry.start
+                 end
           puts file
         end
       else
@@ -625,7 +697,11 @@ when "show"
           STDERR.puts "File #{filename.inspect} not found"
           exit 1
         else
-          file = NixFile.new nixdisk.directory, entry.start
+          file = if entry.is_system?
+                   SysDir.new entry
+                 else
+                   NixFile.new nixdisk.directory, entry.start
+                 end
           puts file
         end
       end
@@ -635,7 +711,7 @@ when "copy"
   ARGV.each do |filename|
     if filename == "*"
       nixdisk.directory.each do |entry|
-        if entry.flag != 0x40
+        unless entry.is_system?
           file = NixFile.new nixdisk.directory, entry.start
           puts file.name
           file.copy file.name
@@ -647,8 +723,8 @@ when "copy"
         STDERR.puts "File #{filename.inspect} not found"
         exit 1
       else
-        if entry.flag != 0x0
-          STDERR.puts "Can't handle #{entry}"
+        if entry.is_system?
+          STDERR.puts "#{filename} is a system directory"
         else
           file = NixFile.new nixdisk.directory, entry.start
           puts file.name
